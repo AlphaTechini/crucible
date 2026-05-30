@@ -865,3 +865,96 @@ MIT — see [LICENSE](../LICENSE) for details.
 - `src/jobs/` – Background job definitions (Apalis)
 - `src/services/` – Business logic and external integrations
 - `src/telemetry/` – Observability and logging setup
+
+## Configuration
+
+This application uses a layered configuration system. Base values and environment-specific tunings are compiled directly into the binary, ensuring safe fallbacks. Infrastructure secrets and dynamic overrides are provided securely at runtime via environment variables.
+
+### Setting the Environment
+The application environment is controlled by the `APP_ENV` environment variable.
+Valid values: `development` (or `dev`), `staging` (or `stg`), `production` (or `prod`).
+If `APP_ENV` is omitted, the application safely defaults to `development` and emits a warning log.
+
+### Environment Variables
+
+| Variable | Type | Default | Required in Prod? | Description |
+|---|---|---|---|---|
+| `APP_ENV` | String | `development` | Yes | Defines the execution environment. |
+| `APP_SERVER__PORT` | Integer | (from TOML) | No | HTTP server listen port. |
+| `APP_SERVER__TLS__CERT_PATH` | String | None | Yes | Path to the TLS certificate chain. |
+| `APP_SERVER__TLS__KEY_PATH` | String | None | Yes | Path to the TLS private key. **(SENSITIVE)** |
+| `APP_DATABASE__URL` | String | None | Yes | PostgreSQL connection string. **(SENSITIVE)** |
+| `APP_DATABASE__MAX_CONNECTIONS`| Integer | (from TOML) | No | Maximum size of the database connection pool. |
+| `APP_REDIS__URL` | String | None | Yes | Redis connection string. **(SENSITIVE)** |
+| `APP_REDIS__JOB_QUEUE_URL` | String | Falls back to URL | No | Separate Redis instance for the job queue. **(SENSITIVE)** |
+| `APP_OBSERVABILITY__LOG_LEVEL` | String | (from TOML) | No | Logging verbosity (e.g., `info`, `warn`, `debug`). |
+
+### How to Add a New Configuration Field
+
+1. Add the field to the relevant struct in `backend/src/config/` (e.g., `ServerConfig` in `server.rs`).
+2. Add a sensible default value for it in `backend/src/config/defaults/default.toml`.
+3. If the value needs to differ by environment, override it in `development.toml`, `staging.toml`, or `production.toml`.
+4. If the field is an infrastructure secret, *do not* put it in the TOML files. Pass it at runtime via the corresponding environment variable (e.g., `APP_NEW_MODULE__SECRET_KEY`).
+5. (Optional) Add validation logic to `AppConfig::validate` in `backend/src/config/mod.rs` if the field has hard constraints.
+
+### 🔒 Security Note
+Certain configuration fields are sensitive and **must never be logged or committed to version control**. 
+These include:
+- `DatabaseConfig::url`
+- `RedisConfig::url`
+- `RedisConfig::job_queue_url`
+- `TlsConfig::key_path`
+
+These fields implement a custom `Debug` trait that automatically replaces their contents with `"[REDACTED]"` to prevent accidental leakage in application logs or panic traces. Additionally, they are marked to skip serialization.
+
+## Testing
+
+This project utilizes highly isolated, in-process integration testing leveraging Axum's `oneshot` capability.
+
+### Running Tests
+Execute the test suite natively using Cargo:
+```bash
+cargo test
+```
+
+### Environment Requirements
+Integration tests require a running PostgreSQL instance and Redis instance.
+- `TEST_DATABASE_URL`: (Default: `postgres://postgres:password@localhost/crucible_test`)
+- `TEST_REDIS_URL`: (Default: `redis://127.0.0.1/1`)
+
+### Test Database Isolation Strategy
+We utilize **Isolated Schemas** rather than database truncation or transactions. For every `#[tokio::test]` executed, the `TestContext` dynamically creates a completely isolated PostgreSQL schema (e.g. `test_a1b2c3d4...`) and maps the SQLx connection pool strictly to that `search_path`.
+- **Parallelization**: Tests never share state. They run fully concurrently.
+- **Safety**: No cross-test pollution. The schema is dropped entirely on `Drop`.
+
+### Writing a New Integration Test
+You can utilize the `ApiTestClient` located in `src/test_utils/client.rs`.
+
+```rust
+use crate::test_utils::{setup, client::ApiTestClient};
+
+#[tokio::test]
+async fn test_create_resource() {
+    // 1. Spin up isolated context (DB, Redis, Router)
+    let ctx = setup().await;
+    let client = ApiTestClient::new(ctx.app);
+
+    // 2. Perform fluent API request
+    let payload = serde_json::json!({ "name": "Crucible" });
+    
+    let response = client.post("/api/resources")
+        .bearer("mock-token")
+        .json(&payload)
+        .send()
+        .await;
+
+    // 3. Chain assertions and extract typed body
+    response
+        .assert_status(StatusCode::CREATED)
+        .assert_json_field("name", "Crucible");
+}
+```
+
+### Adding New Fixture Helpers
+To add reusable database states, write standard async functions in `src/test_utils/fixtures.rs` that accept `&PgPool`. Because schemas are isolated, fixtures never need to worry about cleaning up after themselves.
+

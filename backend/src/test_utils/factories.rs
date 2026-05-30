@@ -25,10 +25,10 @@
 //!     .finish();
 //! ```
 
-pub mod user;
 pub mod order;
 pub mod product;
 pub mod session;
+pub mod user;
 
 pub use user::{UserFactory, build as build_user, create as create_user, create_with as create_user_with, create_many as create_users, create_many_with as create_users_with, Role};
 pub use order::{OrderFactory, build as build_order, create as create_order, create_with as create_order_with, create_many as create_orders, create_many_with as create_orders_with, create_for_user as create_order_for_user, create_with_items as create_order_with_items, OrderStatus, PaymentMethod, OrderItem};
