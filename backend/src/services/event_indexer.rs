@@ -126,12 +126,10 @@ impl EventIndexer {
     pub async fn prune(&self, keep_ledgers: i64) -> Result<u64, sqlx::Error> {
         let latest = self.latest_ledger().await?.unwrap_or(0);
         let cutoff = latest.saturating_sub(keep_ledgers);
-        let result = sqlx::query(
-            "DELETE FROM contract_events WHERE ledger_sequence < $1",
-        )
-        .bind(cutoff)
-        .execute(&self.db)
-        .await?;
+        let result = sqlx::query("DELETE FROM contract_events WHERE ledger_sequence < $1")
+            .bind(cutoff)
+            .execute(&self.db)
+            .await?;
         let deleted = result.rows_affected();
         if deleted > 0 {
             warn!(deleted, cutoff, "Pruned old contract events");

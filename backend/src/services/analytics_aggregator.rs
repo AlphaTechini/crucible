@@ -70,9 +70,7 @@ impl AnalyticsAggregator {
         // Populate cache (best-effort)
         if let Ok(mut conn) = self.redis.get_async_connection().await {
             if let Ok(json) = serde_json::to_string(&analytics) {
-                let _: Result<(), _> = conn
-                    .set_ex(&cache_key, json, CACHE_TTL_SECS)
-                    .await;
+                let _: Result<(), _> = conn.set_ex(&cache_key, json, CACHE_TTL_SECS).await;
             }
         }
 
@@ -121,13 +119,12 @@ impl AnalyticsAggregator {
         .unwrap_or((None,));
 
         // Last activity timestamp
-        let (last_activity,): (Option<DateTime<Utc>>,) = sqlx::query_as(
-            "SELECT MAX(indexed_at) FROM contract_events WHERE contract_id = $1",
-        )
-        .bind(contract_id)
-        .fetch_one(&self.db)
-        .await
-        .unwrap_or((None,));
+        let (last_activity,): (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT MAX(indexed_at) FROM contract_events WHERE contract_id = $1")
+                .bind(contract_id)
+                .fetch_one(&self.db)
+                .await
+                .unwrap_or((None,));
 
         let error_rate = if total_calls > 0 {
             error_count as f64 / total_calls as f64

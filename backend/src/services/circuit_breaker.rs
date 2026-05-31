@@ -97,7 +97,9 @@ impl CircuitBreakerInner {
         match self.state {
             CircuitState::Closed => {
                 if self.consecutive_failures >= self.config.failure_threshold {
-                    self.state = CircuitState::Open { opened_at: Instant::now() };
+                    self.state = CircuitState::Open {
+                        opened_at: Instant::now(),
+                    };
                     warn!(
                         failures = self.consecutive_failures,
                         "Circuit breaker opened after threshold exceeded"
@@ -105,7 +107,9 @@ impl CircuitBreakerInner {
                 }
             }
             CircuitState::HalfOpen => {
-                self.state = CircuitState::Open { opened_at: Instant::now() };
+                self.state = CircuitState::Open {
+                    opened_at: Instant::now(),
+                };
                 warn!("Circuit breaker re-opened after probe failure");
             }
             _ => {}
