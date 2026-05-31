@@ -53,6 +53,10 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// 411 — The request must contain a Content-Length header.
+    #[error("Length required: {0}")]
+    LengthRequired(String),
+
     /// 409 — The request conflicts with the current state.
     #[error("Conflict: {0}")]
     Conflict(String),
@@ -83,9 +87,7 @@ impl IntoResponse for AppError {
         let (status, code, message) = match &self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
-            AppError::Unauthorized(msg) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", msg.clone())
-            }
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
             AppError::ValidationError(msg) => {
@@ -105,6 +107,14 @@ impl IntoResponse for AppError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "redis_error",
                     "An internal cache error occurred".to_string(),
+                )
+            }
+            AppError::Serialization(e) => {
+                error!("Serialization error: {e:?}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "serialization_error",
+                    "A serialization error occurred".to_string(),
                 )
             }
             AppError::InternalError(msg) => {
@@ -162,6 +172,12 @@ mod tests {
     fn test_internal_error_display() {
         let err = AppError::InternalError("unexpected state".into());
         assert_eq!(err.to_string(), "Internal error: unexpected state");
+    }
+
+    #[test]
+    fn test_length_required_error_display() {
+        let err = AppError::LengthRequired("Content-Length header required".into());
+        assert_eq!(err.to_string(), "Length required: Content-Length header required");
     }
 
     #[test]

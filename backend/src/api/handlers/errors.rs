@@ -3,13 +3,12 @@
 // Implements endpoints for build error analytics dashboard.
 // Uses Axum for HTTP, SQLx for DB, Redis for caching, and tracing for observability.
 
-use axum::{extract::State, response::IntoResponse, Json, Router, routing::get};
+use crate::error::AppError;
+use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use redis::AsyncCommands;
 use tracing::{info, instrument};
-use crate::error::AppError;
-use crate::telemetry;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BuildErrorAnalytics {
@@ -18,7 +17,7 @@ pub struct BuildErrorAnalytics {
     pub recent_errors: Vec<BuildErrorDetail>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BuildErrorDetail {
     pub id: i64,
     pub error_type: String,
@@ -45,15 +44,15 @@ pub async fn get_build_error_analytics(
         .fetch_one(&pool)
         .await?;
     let error_types = sqlx::query_as::<_, (String, i64)>(
-        "SELECT error_type, COUNT(*) FROM build_errors GROUP BY error_type ORDER BY COUNT(*) DESC"
+        "SELECT error_type, COUNT(*) FROM build_errors GROUP BY error_type ORDER BY COUNT(*) DESC",
     )
-        .fetch_all(&pool)
-        .await?;
-    let recent_errors = sqlx::query_as!(BuildErrorDetail,
-        "SELECT id, error_type, message, occurred_at FROM build_errors ORDER BY occurred_at DESC LIMIT 10"
+    .fetch_all(&pool)
+    .await?;
+    let recent_errors = sqlx::query_as::<_, BuildErrorDetail>(
+        "SELECT id, error_type, message, occurred_at FROM build_errors ORDER BY occurred_at DESC LIMIT 10",
     )
-        .fetch_all(&pool)
-        .await?;
+    .fetch_all(&pool)
+    .await?;
 
     let analytics = BuildErrorAnalytics {
         total_errors: total_errors.0,
@@ -62,11 +61,13 @@ pub async fn get_build_error_analytics(
     };
 
     // Cache result
-    let _ = redis_conn.set_ex(
-        "build_error_analytics",
-        serde_json::to_string(&analytics).unwrap(),
-        60,
-    ).await;
+    let _ = redis_conn
+        .set_ex(
+            "build_error_analytics",
+            serde_json::to_string(&analytics).unwrap(),
+            60,
+        )
+        .await;
 
     Ok(Json(analytics))
 }

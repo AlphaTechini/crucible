@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::services::tracing::TracingService;
 use chrono::{DateTime, Utc};
 use redis::{AsyncCommands, Client as RedisClient};
 use serde::{Deserialize, Serialize};

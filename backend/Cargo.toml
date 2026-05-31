@@ -87,6 +87,7 @@ mockall = { version = "0.13", optional = true }
 tokio-util = "0.7"
 cron = "0.12"
 async-trait = "0.1"
+arc-swap = "1.7"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

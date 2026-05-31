@@ -5,9 +5,11 @@
 
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{DateTime, Utc};
+use redis::Client as RedisClient;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::{info, info_span, instrument};
 use utoipa::ToSchema;
 
 use crate::api::contracts::{
@@ -170,7 +172,7 @@ pub async fn get_health(
         "Health check completed"
     );
 
-    Ok(Json(response));
+    Ok(Json(response))
 }
 
 /// `GET /api/v1/profiling/prometheus` — Prometheus-compatible metrics.
@@ -223,7 +225,7 @@ pub async fn get_system_status(
 )]
 #[instrument(skip_all, fields(http.method = "POST", http.route = "/api/profile"))]
 pub async fn trigger_profile_collection(
-    State(_state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>, 
     ValidatedJson(payload): ValidatedJson<ProfileTriggerRequest>,
 ) -> ApiResponse<ProfileTriggerResponse> {
     let profile_id = uuid::Uuid::new_v4();

@@ -422,14 +422,12 @@ impl MetricsExporter {
         info!(metrics = ?*metrics, "Updated system metrics");
     }
 
-    #[instrument(skip(self), fields(service.name = "MetricsExporter", service.method = "get_metrics"))]
     pub async fn get_metrics(&self) -> SystemMetrics {
         let span = TracingService::service_method_span("MetricsExporter", "get_metrics");
         let _enter = span.enter();
         self.current_metrics.read().await.clone()
     }
 
-    #[instrument(skip(exporter), fields(service.name = "MetricsExporter", service.method = "run_collector"))]
     pub async fn run_collector(exporter: Arc<Self>) {
         info!("Starting system metrics collector worker");
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));

@@ -321,6 +321,27 @@ The backend runs several background workers for system health and data consisten
 - `src/jobs/` – Background job definitions (Apalis)
 - `src/services/` – Business logic and external integrations
 - `src/telemetry/` – Observability and logging setup
+
+## Build Request Deduplication
+
+The backend includes a build request deduplication service in `src/services/dedup.rs`.
+It fingerprints build submissions with SHA-256, uses Redis `SET NX EX` for fast
+in-flight duplicate suppression, persists accepted fingerprints in PostgreSQL,
+and enqueues accepted requests into a Redis list for build workers.
+
+The service exposes an Axum router for `POST /build-requests` when mounted by the
+application. Duplicate submissions return `duplicate` or `in_progress` decisions
+instead of enqueueing repeated build work.
+
+Schema is managed by `migrations/20260528010000_build_request_dedup.sql`. The
+service also exposes `BuildDedupService::ensure_schema` for isolated integration
+tests that need to provision the table directly.
+
+## Test Fixture Factory
+
+`src/test_utils/factories.rs` provides `FixtureFactory` and `TestFixture` for
+creating related users, products, orders, and sessions in tests. Existing
+domain-specific factories remain available.
 - `src/utils/` – Serialization, validation, XDR helpers
 - `src/test_utils/` – Mock traits for unit testing
 
@@ -337,6 +358,7 @@ The backend runs several background workers for system health and data consisten
 | Module | Description |
 |---|---|
 | `sys_metrics` | Build system metrics exporter with PostgreSQL persistence and Redis caching (compilation times, dependency counts, cache hit rates) |
+| `cache_metrics` | Cache operation analytics with PostgreSQL event storage and Redis-cached summaries |
 | `error_recovery` | Tracks retry state for failing tasks with configurable max retries |
 | `log_aggregator` | Async MPSC-based log pipeline; persists entries via a background worker |
 | `log_alerts` | Threshold-based alerting over the log pipeline with sliding-window evaluation |
@@ -428,6 +450,9 @@ All workers are designed to be production-ready with comprehensive error handlin
 | `GET` | `/api/v1/profiling/health` | Service health check (OpenAPI) |
 | `GET` | `/api/v1/dashboard/metrics` | Dashboard aggregated metrics with Redis caching |
 | `GET` | `/api/v1/dashboard/contracts/:contract_id/stats` | Contract-specific statistics |
+| `POST` | `/cache-metrics` | Record a cache operation metric |
+| `GET` | `/cache-metrics` | List recent cache operation metrics |
+| `GET` | `/cache-metrics/summary` | Cache hit/miss, latency, payload, and operation analytics |
 | `GET` | `/api/v1/profiling/prometheus` | Prometheus-compatible metrics |
 | `GET` | `/api/status` | System health summary and recovery status |
 | `POST` | `/api/profile` | Trigger a manual profiling collection run |
@@ -666,8 +691,73 @@ The distributed cron job scheduler guarantees single execution per tick across m
 ### Usage Example
 
 ```rust
-use crucible_backend::workers::scheduler::{Scheduler, JobDefinition};
-use crucible_backend::workers::jobs::{HealthCheckJob, CleanupJob};
+use backend::services::sys_metrics::{BuildMetricsService, BuildMetric, BuildStatus};
+use sqlx::PgPool;
+use redis::Client;
+
+let service = BuildMetricsService::new(pool, redis);
+
+// Record a build metric
+let metric = BuildMetric {
+    id: None,
+    project_name: "crucible".to_string(),
+    build_id: "build-123".to_string(),
+    build_status: BuildStatus::Success,
+    compilation_time_ms: 5000,
+    dependency_count: 42,
+    cache_hit_rate: Some(85.5),
+    cpu_usage: Some(75.2),
+    memory_usage_mb: Some(1024),
+    build_timestamp: Utc::now(),
+};
+service.record_build(metric).await?;
+
+// Get project metrics with caching
+let metrics = service.get_project_metrics("crucible", 10).await?;
+
+// Get aggregated summary
+let summary = service.get_project_summary("crucible").await?;
+println!("Success rate: {}%", summary.success_rate);
+```
+
+### API Reference
+
+#### BuildMetricsService
+
+- `new(db, redis)` - Create a new metrics service
+- `record_build(metric)` - Record a build metric (invalidates cache)
+- `get_project_metrics(project_name, limit)` - Get metrics for a project (with caching)
+- `get_project_summary(project_name)` - Get aggregated statistics
+- `get_recent_metrics(limit)` - Get recent builds across all projects
+- `delete_project_metrics(project_name)` - Delete all metrics for a project
+
+## Cache Metrics and Analytics
+
+The `cache_metrics` module records cache operations as durable PostgreSQL events and caches aggregate summaries in Redis with a short TTL.
+
+- `CacheMetricsService::record(input)` - Persist a cache operation and invalidate affected summaries
+- `CacheMetricsService::recent(query)` - Read bounded recent cache events
+- `CacheMetricsService::summary(query)` - Return hit/miss counts, hit rate, latency, payload totals, and operation breakdowns
+- `CacheMetricsService::ensure_schema()` - Create the table and indexes for tests or embedded deployments
+- `router(service)` - Build Axum routes for recording and reading cache analytics
+
+## Backup Service Configuration
+
+All configuration is via environment variables.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `REDIS_URL` | No | `redis://127.0.0.1/` | Redis connection string |
+| `BACKUP_QUEUE` | No | `backup_jobs` | Redis list key for backup jobs |
+| `RESTORE_QUEUE` | No | `restore_jobs` | Redis list key for restore jobs |
+| `BIND_ADDR` | No | `0.0.0.0:8080` | HTTP server bind address |
+| `BACKUP_DIR` | No | `/var/backups/crucible` | Directory for `pg_dump` output files |
+## Configuration Hot-Reload
+
+`ConfigWatcher` holds the live `AppConfig` behind an `Arc<RwLock<_>>`. Any part of the application that holds a `ConfigHandle` sees new values immediately after a reload — no restart required.
+
+```rust
 use std::sync::Arc;
 
 let mut scheduler = Scheduler::new(pool.clone(), redis_client.clone());
@@ -775,3 +865,96 @@ MIT — see [LICENSE](../LICENSE) for details.
 - `src/jobs/` – Background job definitions (Apalis)
 - `src/services/` – Business logic and external integrations
 - `src/telemetry/` – Observability and logging setup
+
+## Configuration
+
+This application uses a layered configuration system. Base values and environment-specific tunings are compiled directly into the binary, ensuring safe fallbacks. Infrastructure secrets and dynamic overrides are provided securely at runtime via environment variables.
+
+### Setting the Environment
+The application environment is controlled by the `APP_ENV` environment variable.
+Valid values: `development` (or `dev`), `staging` (or `stg`), `production` (or `prod`).
+If `APP_ENV` is omitted, the application safely defaults to `development` and emits a warning log.
+
+### Environment Variables
+
+| Variable | Type | Default | Required in Prod? | Description |
+|---|---|---|---|---|
+| `APP_ENV` | String | `development` | Yes | Defines the execution environment. |
+| `APP_SERVER__PORT` | Integer | (from TOML) | No | HTTP server listen port. |
+| `APP_SERVER__TLS__CERT_PATH` | String | None | Yes | Path to the TLS certificate chain. |
+| `APP_SERVER__TLS__KEY_PATH` | String | None | Yes | Path to the TLS private key. **(SENSITIVE)** |
+| `APP_DATABASE__URL` | String | None | Yes | PostgreSQL connection string. **(SENSITIVE)** |
+| `APP_DATABASE__MAX_CONNECTIONS`| Integer | (from TOML) | No | Maximum size of the database connection pool. |
+| `APP_REDIS__URL` | String | None | Yes | Redis connection string. **(SENSITIVE)** |
+| `APP_REDIS__JOB_QUEUE_URL` | String | Falls back to URL | No | Separate Redis instance for the job queue. **(SENSITIVE)** |
+| `APP_OBSERVABILITY__LOG_LEVEL` | String | (from TOML) | No | Logging verbosity (e.g., `info`, `warn`, `debug`). |
+
+### How to Add a New Configuration Field
+
+1. Add the field to the relevant struct in `backend/src/config/` (e.g., `ServerConfig` in `server.rs`).
+2. Add a sensible default value for it in `backend/src/config/defaults/default.toml`.
+3. If the value needs to differ by environment, override it in `development.toml`, `staging.toml`, or `production.toml`.
+4. If the field is an infrastructure secret, *do not* put it in the TOML files. Pass it at runtime via the corresponding environment variable (e.g., `APP_NEW_MODULE__SECRET_KEY`).
+5. (Optional) Add validation logic to `AppConfig::validate` in `backend/src/config/mod.rs` if the field has hard constraints.
+
+### 🔒 Security Note
+Certain configuration fields are sensitive and **must never be logged or committed to version control**. 
+These include:
+- `DatabaseConfig::url`
+- `RedisConfig::url`
+- `RedisConfig::job_queue_url`
+- `TlsConfig::key_path`
+
+These fields implement a custom `Debug` trait that automatically replaces their contents with `"[REDACTED]"` to prevent accidental leakage in application logs or panic traces. Additionally, they are marked to skip serialization.
+
+## Testing
+
+This project utilizes highly isolated, in-process integration testing leveraging Axum's `oneshot` capability.
+
+### Running Tests
+Execute the test suite natively using Cargo:
+```bash
+cargo test
+```
+
+### Environment Requirements
+Integration tests require a running PostgreSQL instance and Redis instance.
+- `TEST_DATABASE_URL`: (Default: `postgres://postgres:password@localhost/crucible_test`)
+- `TEST_REDIS_URL`: (Default: `redis://127.0.0.1/1`)
+
+### Test Database Isolation Strategy
+We utilize **Isolated Schemas** rather than database truncation or transactions. For every `#[tokio::test]` executed, the `TestContext` dynamically creates a completely isolated PostgreSQL schema (e.g. `test_a1b2c3d4...`) and maps the SQLx connection pool strictly to that `search_path`.
+- **Parallelization**: Tests never share state. They run fully concurrently.
+- **Safety**: No cross-test pollution. The schema is dropped entirely on `Drop`.
+
+### Writing a New Integration Test
+You can utilize the `ApiTestClient` located in `src/test_utils/client.rs`.
+
+```rust
+use crate::test_utils::{setup, client::ApiTestClient};
+
+#[tokio::test]
+async fn test_create_resource() {
+    // 1. Spin up isolated context (DB, Redis, Router)
+    let ctx = setup().await;
+    let client = ApiTestClient::new(ctx.app);
+
+    // 2. Perform fluent API request
+    let payload = serde_json::json!({ "name": "Crucible" });
+    
+    let response = client.post("/api/resources")
+        .bearer("mock-token")
+        .json(&payload)
+        .send()
+        .await;
+
+    // 3. Chain assertions and extract typed body
+    response
+        .assert_status(StatusCode::CREATED)
+        .assert_json_field("name", "Crucible");
+}
+```
+
+### Adding New Fixture Helpers
+To add reusable database states, write standard async functions in `src/test_utils/fixtures.rs` that accept `&PgPool`. Because schemas are isolated, fixtures never need to worry about cleaning up after themselves.
+

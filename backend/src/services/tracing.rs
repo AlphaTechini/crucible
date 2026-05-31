@@ -6,8 +6,8 @@
 
 #![allow(dead_code)]
 
-use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::{Config, RandomIdGenerator, Sampler};
 use opentelemetry_sdk::Resource;

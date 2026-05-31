@@ -58,7 +58,7 @@ impl IntoResponse for ConfigReloadError {
 
 /// Manages hot-reloadable application configuration via `ArcSwap`.
 pub struct ConfigManager {
-    current_config: ArcSwap<AppConfig>,
+    current_config: ArcSwap<BaseAppConfig>,
 }
 
 impl ConfigManager {
