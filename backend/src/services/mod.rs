@@ -5,6 +5,8 @@ pub mod cache_metrics;
 pub mod compilation;
 pub mod contract_monitor;
 pub mod contract_registry;
+pub mod gas_optimizer;
+pub mod vulnerability_scanner;
 pub mod dedup;
 pub mod dependency_analyzer;
 pub mod doc_generator;
