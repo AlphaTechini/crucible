@@ -190,11 +190,11 @@ async fn run_job_loop(
             .arg("NX")
             .arg("PX")
             .arg(lock_ttl_ms)
-            .query_async(&mut conn)
+            .query_async::<Option<String>>(&mut conn)
             .await
         {
             Ok(Some(v)) if v == "OK" => true,
-            Ok(v) => v, // If it returns true/1
+            Ok(_) => false,
             Err(e) => {
                 error!("Failed to acquire distributed lock: {}", e);
                 continue;
