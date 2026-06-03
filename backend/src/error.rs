@@ -9,27 +9,47 @@ use axum::{
     Json,
 };
 use serde::Serialize;
-use serde_json::json;
 use thiserror::Error;
 use tracing::error;
 
+/// Structured error response returned to API clients.
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    /// Machine-readable error code (e.g., `"database_error"`, `"not_found"`).
+    pub code: String,
+    /// Human-readable error message.
+    pub message: String,
+}
+
+/// Application-level error type that unifies all possible error sources.
+///
+/// Each variant maps to an HTTP status code and produces a consistent
+/// JSON error response via the [`IntoResponse`] implementation.
+/// # Examples
+/// ```rust,no_run
+/// use backend::error::AppError;
+/// async fn handler() -> Result<String, AppError> {
+///     Err(AppError::NotFound("Contract not found".into()))
+/// }
+/// ```
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    DatabaseError(#[from] sqlx::Error),
 
     /// 500 — An internal Redis error occurred.
     #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
-
-    /// 500 — A serialization error occurred.
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    RedisError(#[from] redis::RedisError),
 
     #[error("Internal server error: {0}")]
     Internal(String),
 
     /// 502 — Stellar network communication failure.
+    /// 500 — A catch-all for unexpected internal errors.
+    #[error("Internal error: {0}")]
+    InternalError(String),
+
+    /// 502 — A Stellar network operation failed.
     #[error("Stellar operation failed: {0}")]
     StellarError(String),
 }
@@ -56,6 +76,17 @@ impl IntoResponse for AppError {
         let (status, message) = match self {
             AppError::Database(ref e) => {
                 error!("Database error occurred: {:?}", e);
+        let (status, code, message) = match &self {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg.clone()),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg.clone()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg.clone()),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
+            AppError::ValidationError(msg) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "validation_error", msg.clone())
+            }
+            AppError::DatabaseError(e) => {
+                error!("Database error: {e:?}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "A database error occurred".to_string(),
@@ -71,6 +102,24 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized access".to_string()),
+            AppError::RedisError(e) => {
+                error!("Redis error: {e:?}");
+                    "redis_error",
+                    "An internal cache error occurred".to_string(),
+                )
+            }
+            AppError::Serialization(e) => {
+                error!("Serialization error: {e:?}");
+                    "serialization_error",
+                    "A serialization error occurred".to_string(),
+                )
+            }
+            AppError::InternalError(msg) => {
+                error!("Internal error: {msg}");
+                    "internal_error",
+                    "An internal error occurred".to_string(),
+                )
+            }
             AppError::StellarError(msg) => {
                 error!("Stellar error: {}", msg);
                 (

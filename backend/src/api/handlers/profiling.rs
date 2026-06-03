@@ -11,47 +11,88 @@ use crate::services::{
     log_aggregator::LogAggregator,
 };
 use crate::config::reload::ConfigManager;
+//! Performance profiling and system health API handlers.
+//!
+//! Provides endpoints for monitoring application health, collecting system
+//! metrics, and triggering profiling runs.
+
+use axum::{extract::State, response::IntoResponse, Json};
 use redis::Client as RedisClient;
 use crate::api::contracts::{ApiResponse, SystemStatus, ProfileTriggerRequest, ProfileTriggerResponse, ValidatedJson};
 
+use crate::api::contracts::{
+    ApiResponse, ProfileTriggerRequest, ProfileTriggerResponse, SystemStatus, ValidatedJson,
+};
+use crate::config::reload::ConfigManager;
+use crate::error::AppError;
+use crate::services::{
+    error_recovery::ErrorManager,
+    log_aggregator::LogAggregator,
+    sys_metrics::MetricsExporter,
+    tracing::TracingService,
+};
+use redis::Client as RedisClient;
+
+// ---------------------------------------------------------------------------
+// Shared application state
+// ---------------------------------------------------------------------------
+
+/// Shared application state passed to profiling and status handlers.
 pub struct AppState {
+    /// Optional PostgreSQL connection pool (None in tests).
     pub db: Option<sqlx::PgPool>,
+    /// System metrics exporter.
     pub metrics_exporter: Arc<MetricsExporter>,
+    /// Error recovery manager.
     pub error_manager: Arc<ErrorManager>,
+    /// Hot-reloadable configuration manager.
     pub config_manager: Arc<ConfigManager>,
+    /// Async log aggregation pipeline.
     pub log_aggregator: Arc<LogAggregator>,
+    /// Redis client for caching.
     pub redis: RedisClient,
 }
 
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
+
+/// Detailed performance metrics report.
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct MetricsReport {
-    /// Total system uptime in seconds
+    /// Total system uptime in seconds.
     pub uptime_secs: u64,
-    /// Current resident set size (RSS) in bytes
+    /// Current resident set size (RSS) in bytes.
     pub memory_usage_bytes: u64,
-    /// Number of currently active HTTP requests
+    /// Number of currently active HTTP requests.
     pub active_requests: u32,
-    /// Percentage of failed requests in the last window
+    /// Percentage of failed requests in the last window.
     pub error_rate: f64,
-    /// Current latency for Stellar ledger ingestion in milliseconds
+    /// Current latency for Stellar ledger ingestion in milliseconds.
     pub ledger_ingestion_latency_ms: u32,
 }
 
+/// System health check response.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
-    /// Overall health status (e.g., 'healthy' or 'degraded')
+    /// Overall health status (e.g., `"healthy"` or `"degraded"`).
     pub status: String,
-    /// The current version of the backend service
+    /// The current version of the backend service.
     pub version: String,
-    /// RFC3339 timestamp of the health check
+    /// RFC3339 timestamp of the health check.
     pub timestamp: DateTime<Utc>,
-    /// Connectivity status to the PostgreSQL database
+    /// Connectivity status to the PostgreSQL database.
     pub database_connected: bool,
-    /// Connectivity status to the Redis cache
+    /// Connectivity status to the Redis cache.
     pub redis_connected: bool,
 }
 
-/// Handler for retrieving detailed performance metrics.
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/profiling/metrics` — retrieve detailed performance metrics.
+///
 /// Optimized for consumption by monitoring tools like Grafana.
 #[utoipa::path(
     get,
@@ -70,8 +111,8 @@ pub async fn get_metrics(
     let _enter = span.enter();
     
     tracing::info!("Collecting performance metrics");
+    info!("Collecting performance metrics");
 
-    // Instrument the metrics exporter call
     let metrics_span = TracingService::service_method_span("MetricsExporter", "get_metrics");
     let _metrics_enter = metrics_span.enter();
     let sys_metrics = state.metrics_exporter.get_metrics().await;
@@ -88,14 +129,14 @@ pub async fn get_metrics(
     tracing::info!(
         uptime = sys_metrics.uptime,
         memory = sys_metrics.memory_usage,
-        active_requests = 12,
         "Metrics collected successfully"
     );
 
     Ok(Json(report))
 }
 
-/// Handler for system health checks.
+/// `GET /api/v1/profiling/health` — system health check.
+///
 /// Performs actual pings to downstream services.
 #[utoipa::path(
     get,
@@ -126,8 +167,15 @@ pub async fn get_health(
         
         let healthy = sqlx::query("SELECT 1")
             .fetch_optional(db)
+#[instrument(skip_all, fields(http.method = "GET", http.route = "/api/v1/profiling/health"))]
+    info!("Performing system health check");
+
+    let db_healthy = if let Some(ref pool) = state.db {
+        let db_span = TracingService::db_query_span("SELECT 1", "postgres", "PING");
+        let result = sqlx::query("SELECT 1")
+            .fetch_optional(pool)
             .await
-            .map(|result| result.is_some())
+            .map(|r| r.is_some())
             .unwrap_or_else(|e| {
                 TracingService::record_error(&db_span, &e.to_string(), "database");
                 false
@@ -138,6 +186,9 @@ pub async fn get_health(
         false
     };
     
+        result
+    };
+
     let response = HealthResponse {
         status: if db_healthy { "healthy" } else { "degraded" }.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -163,6 +214,9 @@ pub async fn get_prometheus_metrics() -> impl IntoResponse {
     
     tracing::info!("Exporting Prometheus-format metrics");
     
+/// `GET /api/v1/profiling/prometheus` — Prometheus-compatible metrics.
+#[instrument(skip_all, fields(http.method = "GET", http.route = "/api/v1/profiling/prometheus"))]
+    info!("Exporting Prometheus-format metrics");
     "# HELP backend_requests_total Total number of requests\n\
      # TYPE backend_requests_total counter\n\
      backend_requests_total 1024\n\
@@ -182,6 +236,10 @@ pub async fn get_system_status(
     
     tracing::info!("Retrieving system status");
     
+/// `GET /api/status` — detailed system status.
+#[instrument(skip_all, fields(http.method = "GET", http.route = "/api/status"))]
+    info!("Retrieving system status");
+
     let metrics_span = TracingService::service_method_span("MetricsExporter", "get_metrics");
     let _metrics_enter = metrics_span.enter();
     let metrics = state.metrics_exporter.get_metrics().await;
@@ -213,5 +271,29 @@ pub async fn trigger_profile_collection(
         profile_id: uuid::Uuid::new_v4(),
         message: format!("Profiling collection triggered for label: {}", payload.label),
         estimated_completion: chrono::Utc::now() + chrono::Duration::seconds(payload.duration_secs as i64),
+/// `POST /api/profile` — trigger a profiling collection run.
+#[utoipa::path(
+    post,
+    path = "/api/profile",
+    responses(
+        (status = 200, description = "Profiling collection triggered"),
+        (status = 400, description = "Invalid request parameters")
+    ),
+    tag = "profiling"
+)]
+#[instrument(skip_all, fields(http.method = "POST", http.route = "/api/profile"))]
+) -> ApiResponse<ProfileTriggerResponse> {
+    let profile_id = uuid::Uuid::new_v4();
+
+    info!(
+        profile_id = %profile_id,
+        label = %payload.label,
+        duration_secs = payload.duration_secs,
+        "Profiling collection triggered"
+    );
+
+        profile_id,
+        estimated_completion: chrono::Utc::now()
+            + chrono::Duration::seconds(payload.duration_secs as i64),
     })
 }

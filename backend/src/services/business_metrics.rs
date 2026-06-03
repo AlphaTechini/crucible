@@ -1,3 +1,10 @@
+//! Business metrics service for tracking revenue, costs, and operational KPIs.
+
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -5,7 +12,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 use uuid::Uuid;
 use utoipa::ToSchema;
 
@@ -25,6 +32,8 @@ pub struct BusinessMetric {
     pub recorded_at: DateTime<Utc>,
     pub source: MetricSource,
 }
+// ---------------------------------------------------------------------------
+// Domain types
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -38,10 +47,12 @@ pub enum MetricCategory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricSource {
     OnChain,
     OffChain,
+    #[default]
     Database,
     ExternalApi,
     #[default]
@@ -71,9 +82,22 @@ impl MetricSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricSnapshot {
-    pub timestamp: DateTime<Utc>,
-    pub metrics: Vec<BusinessMetric>,
+pub struct BusinessMetric {
+    pub id: Uuid,
+    pub name: String,
+    pub value: Decimal,
+    pub unit: String,
+    pub category: MetricCategory,
+    pub tags: HashMap<String, String>,
+    pub recorded_at: DateTime<Utc>,
+    pub source: MetricSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSummary {
+    pub total_metrics: i64,
+    pub categories: HashMap<String, i64>,
+    pub latest_timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +118,8 @@ pub struct MetricsSummary {
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Service
 
 pub struct BusinessMetricsService {
     db: PgPool,
@@ -110,6 +136,8 @@ impl BusinessMetricsService {
 
     /// Record a new business metric with the given parameters.
     #[instrument(skip_all, fields(metric_name))]
+    /// Record a new business metric.
+    #[instrument(skip(self, tags, value, unit, category, source))]
     pub async fn record_metric(
         &self,
         name: String,
@@ -146,6 +174,12 @@ impl BusinessMetricsService {
         let tags_json = serde_json::to_value(&tags)
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
+        let category_str = serde_json::to_string(&category)
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        let source_str = serde_json::to_string(&source)
+        // Store Decimal as string to avoid sqlx type issues
+        let value_str = value.to_string();
+
         sqlx::query(
             r#"
             INSERT INTO business_metrics (id, name, value, unit, category, tags, recorded_at, source)
@@ -154,27 +188,36 @@ impl BusinessMetricsService {
         )
         .bind(id)
         .bind(&name)
-        .bind(value)
+        .bind(&value_str)
         .bind(&unit)
         .bind(&category_str)
         .bind(&tags_json)
         .bind(now)
         .bind(source_str)
+        .bind(&source_str)
         .execute(&self.db)
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to record metric");
-            AppError::Database(e)
+            AppError::DatabaseError(e)
         })?;
 
-        let metric = BusinessMetric::from_row(&row)?;
+        let metric = BusinessMetric {
+            id,
+            name: name.clone(),
+            value,
+            unit,
+            category,
+            tags,
+            recorded_at: now,
+            source,
+        };
 
         // Update in-memory cache
         {
             let mut cache = self.cache.write().await;
             let entry = cache.entry(metric.name.clone()).or_default();
             entry.push(metric.clone());
-            // Keep last 1000 values per metric
             if entry.len() > 1000 {
                 entry.remove(0);
             }
@@ -183,7 +226,6 @@ impl BusinessMetricsService {
         info!(
             metric_name = %metric.name,
             value = %metric.value,
-            category = ?metric.category,
             "Recorded business metric"
         );
 
@@ -425,9 +467,21 @@ impl BusinessMetricsService {
         .await
         .map_err(AppError::Database)?
         .rows_affected();
+        let result = sqlx::query("DELETE FROM business_metrics WHERE recorded_at < $1")
+            .bind(cutoff)
+            .execute(&self.db)
+            .await
+            .map_err(|e| AppError::DatabaseError(e))?;
 
+        let deleted = result.rows_affected();
         info!(deleted, retention_days, "Pruned old metrics");
         Ok(deleted)
+    }
+
+    /// Get the latest cached value for a metric (no DB call).
+    pub async fn get_cached_latest(&self, name: &str) -> Option<BusinessMetric> {
+        let cache = self.cache.read().await;
+        cache.get(name)?.last().cloned()
     }
 }
 
@@ -572,6 +626,8 @@ pub async fn get_metrics_summary(
     let summary = state.service.get_metrics_summary().await?;
     Ok(Json(summary))
 }
+// ---------------------------------------------------------------------------
+// Tests
 
 #[cfg(test)]
 mod tests {
@@ -637,6 +693,23 @@ mod tests {
         let summary = MetricsSummary {
             total_metrics: 42,
             categories: HashMap::from([("revenue".to_string(), 10i64)]),
+
+    fn test_metric_category_serialization() {
+        let cat = MetricCategory::Revenue;
+        let json = serde_json::to_string(&cat).unwrap();
+    }
+
+        let src = MetricSource::default();
+        assert_eq!(src, MetricSource::Database);
+    }
+
+            name: "revenue".to_string(),
+            tags: HashMap::from([("region".into(), "us-east".into())]),
+        };
+        assert!(json.contains("USD"));
+    }
+
+            categories: HashMap::from([("revenue".into(), 10i64)]),
             latest_timestamp: Some(Utc::now()),
         };
         let json = serde_json::to_string(&summary).unwrap();

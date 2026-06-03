@@ -1,10 +1,16 @@
+//! Error recovery service.
+//!
+//! Tracks retry state for failing tasks with configurable max retries.
+
 #![allow(dead_code)]
-use crate::services::tracing::TracingService;
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn, instrument};
+use crate::services::tracing::TracingService;
+
 use crate::services::tracing::TracingService;
 
 #[derive(Error, Debug, Serialize, Deserialize)]
@@ -81,7 +87,6 @@ impl ErrorManager {
     pub async fn get_active_tasks(&self) -> Vec<RecoveryTask> {
         let span = TracingService::service_method_span("ErrorManager", "get_active_tasks");
         let _enter = span.enter();
-
         self.tasks.read().await.clone()
     }
 }
@@ -95,32 +100,25 @@ mod tests {
         let manager = ErrorManager::new();
         let task_name = "test_task";
 
-        // First failure
         manager
-            .handle_error(
-                RecoveryError::Database("connection lost".to_string()),
-                task_name,
-            )
+            .handle_error(RecoveryError::Database("connection lost".to_string()), task_name)
             .await
             .unwrap();
         assert_eq!(manager.get_active_tasks().await.len(), 1);
         assert_eq!(manager.get_active_tasks().await[0].retries, 1);
 
-        // Second failure
         manager
             .handle_error(RecoveryError::Redis("timeout".to_string()), task_name)
             .await
             .unwrap();
         assert_eq!(manager.get_active_tasks().await[0].retries, 2);
 
-        // Third failure
         manager
             .handle_error(RecoveryError::Internal("unknown".to_string()), task_name)
             .await
             .unwrap();
         assert_eq!(manager.get_active_tasks().await[0].retries, 3);
 
-        // Fourth failure - should fail
         let result = manager
             .handle_error(RecoveryError::Internal("last straw".to_string()), task_name)
             .await;

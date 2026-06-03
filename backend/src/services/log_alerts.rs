@@ -102,9 +102,7 @@ impl AlertRule {
     /// Validate that the rule has sensible configuration values.
     pub fn validate(&self) -> Result<(), AlertError> {
         if self.name.trim().is_empty() {
-            return Err(AlertError::InvalidRule(
-                "name must not be empty".to_string(),
-            ));
+            return Err(AlertError::InvalidRule("name must not be empty".to_string()));
         }
         if self.pattern.trim().is_empty() {
             return Err(AlertError::InvalidRule(
@@ -149,7 +147,6 @@ pub struct Alert {
 /// Tracks recent log-entry timestamps per rule for sliding-window evaluation.
 #[derive(Debug, Default)]
 struct RuleState {
-    /// Timestamps of log entries that matched this rule.
     hits: Vec<DateTime<Utc>>,
 }
 
@@ -184,8 +181,6 @@ impl AlertManager {
     }
 
     /// Add or replace an alert rule.
-    ///
-    /// Returns an error if the rule fails validation.
     pub async fn add_rule(&self, rule: AlertRule) -> Result<(), AlertError> {
         rule.validate()?;
         let id = rule.id;
@@ -212,10 +207,6 @@ impl AlertManager {
     }
 
     /// Evaluate a [`LogEntry`] against all active rules.
-    ///
-    /// For each rule whose pattern matches the entry's message, the hit is
-    /// recorded. If the sliding-window count reaches the rule's threshold an
-    /// [`Alert`] is fired and stored.
     pub async fn evaluate(&self, entry: &LogEntry) {
         let rules = self.rules.read().await;
         let mut states = self.rule_states.write().await;
@@ -255,7 +246,6 @@ impl AlertManager {
                     fired_at: Utc::now(),
                     acknowledged: false,
                 });
-                // Reset hits so the alert doesn't re-fire on every subsequent entry.
                 state.hits.clear();
             }
         }
@@ -352,8 +342,6 @@ mod tests {
         }
     }
 
-    // --- AlertRule validation ---
-
     #[test]
     fn test_rule_validation_empty_name() {
         let mut rule = make_rule("ERROR", 3, 60);
@@ -386,15 +374,12 @@ mod tests {
         assert!(rule.validate().is_ok());
     }
 
-    // --- AlertManager CRUD ---
-
     #[tokio::test]
     async fn test_add_and_get_rules() {
         let manager = AlertManager::new();
         let rule = make_rule("ERROR", 3, 60);
         let id = rule.id;
         manager.add_rule(rule).await.unwrap();
-
         let rules = manager.get_rules().await;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, id);
@@ -417,16 +402,12 @@ mod tests {
         assert!(matches!(result, Err(AlertError::RuleNotFound(_))));
     }
 
-    // --- Alert evaluation ---
-
     #[tokio::test]
     async fn test_no_alert_below_threshold() {
         let manager = AlertManager::new();
         manager.add_rule(make_rule("ERROR", 3, 60)).await.unwrap();
-
         manager.evaluate(&make_entry("ERROR occurred")).await;
         manager.evaluate(&make_entry("ERROR occurred")).await;
-
         assert!(manager.get_alerts(None).await.is_empty());
     }
 
@@ -434,11 +415,9 @@ mod tests {
     async fn test_alert_fires_at_threshold() {
         let manager = AlertManager::new();
         manager.add_rule(make_rule("ERROR", 3, 60)).await.unwrap();
-
         for _ in 0..3 {
             manager.evaluate(&make_entry("ERROR occurred")).await;
         }
-
         let alerts = manager.get_alerts(None).await;
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].match_count, 3);
@@ -448,11 +427,7 @@ mod tests {
     async fn test_non_matching_entry_does_not_fire() {
         let manager = AlertManager::new();
         manager.add_rule(make_rule("ERROR", 1, 60)).await.unwrap();
-
-        manager
-            .evaluate(&make_entry("INFO everything is fine"))
-            .await;
-
+        manager.evaluate(&make_entry("INFO everything is fine")).await;
         assert!(manager.get_alerts(None).await.is_empty());
     }
 
@@ -460,32 +435,23 @@ mod tests {
     async fn test_alert_resets_after_firing() {
         let manager = AlertManager::new();
         manager.add_rule(make_rule("ERROR", 2, 60)).await.unwrap();
-
-        // First batch – fires
         manager.evaluate(&make_entry("ERROR a")).await;
         manager.evaluate(&make_entry("ERROR b")).await;
         assert_eq!(manager.get_alerts(None).await.len(), 1);
-
-        // Second batch – fires again after reset
         manager.evaluate(&make_entry("ERROR c")).await;
         manager.evaluate(&make_entry("ERROR d")).await;
         assert_eq!(manager.get_alerts(None).await.len(), 2);
     }
-
-    // --- Acknowledge ---
 
     #[tokio::test]
     async fn test_acknowledge_alert() {
         let manager = AlertManager::new();
         manager.add_rule(make_rule("CRIT", 1, 60)).await.unwrap();
         manager.evaluate(&make_entry("CRIT failure")).await;
-
         let alerts = manager.get_alerts(None).await;
         assert_eq!(alerts.len(), 1);
         let alert_id = alerts[0].id;
-
         manager.acknowledge_alert(alert_id).await.unwrap();
-
         let active = manager.get_active_alerts().await;
         assert!(active.is_empty());
     }
@@ -497,29 +463,21 @@ mod tests {
         assert!(matches!(result, Err(AlertError::AlertNotFound(_))));
     }
 
-    // --- Severity filter ---
-
     #[tokio::test]
     async fn test_filter_alerts_by_severity() {
         let manager = AlertManager::new();
-
         let mut warn_rule = make_rule("WARN", 1, 60);
         warn_rule.severity = AlertSeverity::Warning;
         manager.add_rule(warn_rule).await.unwrap();
-
         let mut crit_rule = make_rule("CRIT", 1, 60);
         crit_rule.severity = AlertSeverity::Critical;
         manager.add_rule(crit_rule).await.unwrap();
-
         manager.evaluate(&make_entry("WARN something")).await;
         manager.evaluate(&make_entry("CRIT something")).await;
-
         let critical = manager.get_alerts(Some(AlertSeverity::Critical)).await;
         assert_eq!(critical.len(), 1);
         assert_eq!(critical[0].severity, AlertSeverity::Critical);
     }
-
-    // --- Clear ---
 
     #[tokio::test]
     async fn test_clear_alerts() {
@@ -527,7 +485,6 @@ mod tests {
         manager.add_rule(make_rule("ERR", 1, 60)).await.unwrap();
         manager.evaluate(&make_entry("ERR boom")).await;
         assert!(!manager.get_alerts(None).await.is_empty());
-
         manager.clear_alerts().await;
         assert!(manager.get_alerts(None).await.is_empty());
     }

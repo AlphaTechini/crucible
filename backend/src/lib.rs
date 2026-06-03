@@ -1,3 +1,5 @@
+//! Crucible backend library crate.
+
 pub mod api;
 pub mod config;
 pub mod db;
