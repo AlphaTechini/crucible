@@ -258,9 +258,11 @@ impl MockEnv {
             }
             let mut matches = true;
             for (i, filter_topic) in filter_topics.iter().enumerate() {
-                if format!("{:?}", filter_topic)
-                    != format!("{:?}", event_topics.get(i as u32).unwrap())
-                {
+                // Compare Soroban `Val` values directly instead of relying on
+                // Debug string formatting. This provides robust type-aware
+                // equality checking (symbols, addresses, integers, tuples, etc.).
+                let ev_topic = event_topics.get(i as u32).unwrap();
+                if filter_topic != ev_topic {
                     matches = false;
                     break;
                 }
