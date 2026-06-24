@@ -119,7 +119,7 @@ pub struct MockEnv {
 }
 
 // Typed event wrapper to provide ergonomic access to event fields and typed data conversion.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CapturedEvent {
     env: Env,
     pub contract: Address,
@@ -146,7 +146,7 @@ impl CapturedEvent {
     /// Convert the event data into a typed Rust value using Soroban's FromVal.
     ///
     /// Example: let amount: i128 = ev.data_as();
-    pub fn data_as<T: FromVal<Env>>(&self) -> T {
+    pub fn data_as<T: FromVal<Env, Val>>(&self) -> T {
         T::from_val(&self.env, &self.data)
     }
 }
@@ -291,11 +291,9 @@ impl MockEnv {
             }
             let mut matches = true;
             for (i, filter_topic) in filter_topics.iter().enumerate() {
-                // Compare Soroban `Val` values directly instead of relying on
-                // Debug string formatting. This provides robust type-aware
-                // equality checking (symbols, addresses, integers, tuples, etc.).
                 let ev_topic = event_topics.get(i as u32).unwrap();
-                if filter_topic != ev_topic {
+                // Val doesn't implement PartialEq; compare raw bit payloads.
+                if filter_topic.get_payload() != ev_topic.get_payload() {
                     matches = false;
                     break;
                 }
